@@ -5,7 +5,7 @@ const CONFIG = {
   MAX_RETRIES: 3,
   TIMEOUT: 8000,
   RATE_LIMIT: 100,          // 每分钟/ip
-   AUTH_TOKEN: null,    // 从环境变量注入
+  AUTH_TOKEN: null,    // 从环境变量注入
   CORS_ORIGINS: ['https://huggingface.co', 'https://qisuanai.com', 'https://chainsight.qisuanai.com'],
 };
 
@@ -25,6 +25,17 @@ const COIN_TO_BINANCE = {
   "the-graph": "GRTUSDT", "algorand": "ALGOUSDT", "theta-token": "THETAUSDT",
   "tezos": "XTZUSDT", "eos": "EOSUSDT", "flow": "FLOWUSDT",
   "maker": "MKRUSDT", "aave": "AAVEUSDT", "curve-dao-token": "CRVUSDT",
+};
+
+// CoinGecko id -> CoinCap id 映射（大部分一致，少数需要单独映射）
+const COIN_TO_COINCAP = {
+  "bitcoin": "bitcoin", "ethereum": "ethereum", "solana": "solana",
+  "binancecoin": "binance-coin", "ripple": "xrp", "cardano": "cardano",
+  "dogecoin": "dogecoin", "avalanche-2": "avalanche", "polkadot": "polkadot",
+  "matic-network": "polygon", "chainlink": "chainlink", "uniswap": "uniswap",
+  "litecoin": "litecoin", "shiba-inu": "shiba-inu", "tron": "tron",
+  "stellar": "stellar", "hedera-hashgraph": "hedera-hashgraph", "ethereum-classic": "ethereum-classic",
+  "near": "near-protocol", "cosmos": "cosmos", "filecoin": "filecoin",
 };
 
 const INTERVAL_MAP = {"5min":"5m","30min":"30m","1h":"1h","6h":"6h","1d":"1d"};
@@ -92,15 +103,26 @@ async function fetchWithTimeout(url, opts = {}, timeout = CONFIG.TIMEOUT) {
 }
 
 // ============================================================================
-// 带重试的 fetch
+// 带重试 + 日志的 fetch
+// 返回 null 时，调用方可以从日志里看到具体失败原因（状态码/异常信息）
 // ============================================================================
 async function fetchWithRetry(url, opts = {}, retries = CONFIG.MAX_RETRIES) {
   for (let i = 0; i < retries; i++) {
     try {
       const resp = await fetchWithTimeout(url, opts);
-      if (resp.status === 429) { await new Promise(r => setTimeout(r, 2000 * (i + 1))); continue; }
-      if (resp.status === 451) { log('warn', 'geo_blocked', { url }); return null; }
-      if (!resp.ok) { log('warn', 'fetch_failed', { url, status: resp.status, attempt: i + 1 }); continue; }
+      if (resp.status === 429) {
+        log('warn', 'rate_limited_upstream', { url, attempt: i + 1 });
+        await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+        continue;
+      }
+      if (resp.status === 451) {
+        log('warn', 'geo_blocked', { url });
+        return null;
+      }
+      if (!resp.ok) {
+        log('warn', 'fetch_failed', { url, status: resp.status, attempt: i + 1 });
+        continue;
+      }
       return resp;
     } catch (e) {
       log('warn', 'fetch_error', { url, error: e.message, attempt: i + 1 });
@@ -110,7 +132,7 @@ async function fetchWithRetry(url, opts = {}, retries = CONFIG.MAX_RETRIES) {
 }
 
 // ============================================================================
-// 数据获取
+// 数据获取（OHLC）
 // ============================================================================
 async function fetchBinance(symbol, interval, limit) {
   const resp = await fetchWithRetry(
@@ -153,6 +175,36 @@ async function fetchCoinGecko(coinId, days) {
       volume: 0,
     }))
   };
+}
+
+// ============================================================================
+// 实时价格获取（三级降级：Binance -> CoinGecko -> CoinCap）
+// ============================================================================
+async function fetchBinancePrice(symbol) {
+  const resp = await fetchWithRetry(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`, {}, 2);
+  if (!resp) return null;
+  const data = await resp.json();
+  if (!data || !data.price) return null;
+  return { source: 'binance', symbol, price: parseFloat(data.price) };
+}
+
+async function fetchCoinGeckoPrice(coinId) {
+  const resp = await fetchWithRetry(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`, {}, 2);
+  if (!resp) return null;
+  const data = await resp.json();
+  const price = data[coinId]?.usd;
+  if (!price) return null;
+  return { source: 'coingecko', coin_id: coinId, price: parseFloat(price) };
+}
+
+async function fetchCoinCapPrice(coinId) {
+  const capId = COIN_TO_COINCAP[coinId] || coinId;
+  const resp = await fetchWithRetry(`https://api.coincap.io/v2/assets/${capId}`, {}, 2);
+  if (!resp) return null;
+  const data = await resp.json();
+  const price = data?.data?.priceUsd;
+  if (!price) return null;
+  return { source: 'coincap', coin_id: coinId, price: parseFloat(price) };
 }
 
 // ============================================================================
@@ -231,9 +283,11 @@ export default {
         // Binance 优先
         const binanceResult = await fetchBinance(symbol, interval, limit);
         if (binanceResult) return binanceResult;
+        log('warn', 'binance_ohlc_failed', { coin: coinId });
         // CoinGecko 降级
         const cgResult = await fetchCoinGecko(coinId, days);
         if (cgResult) return cgResult;
+        log('error', 'all_ohlc_sources_failed', { coin: coinId });
         return null;
       });
 
@@ -242,29 +296,28 @@ export default {
       }
     }
 
-    // ─── 实时价格 ───
+    // ─── 实时价格（三级降级） ───
     else if (path === '/api/price') {
       const coinId = url.searchParams.get('coin_id') || 'bitcoin';
       const symbol = COIN_TO_BINANCE[coinId] || `${coinId.split('-')[0].toUpperCase()}USDT`;
       const cacheKey = `price:${coinId}`;
 
       response = await cachedResponse(request, cacheKey, CONFIG.PRICE_CACHE_TTL, async () => {
-        // Binance
-        try {
-          const resp = await fetchWithTimeout(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
-          if (resp && resp.ok) {
-            const data = await resp.json();
-            return { source: 'binance', symbol, price: parseFloat(data.price) };
-          }
-        } catch {}
-        // CoinGecko 降级
-        try {
-          const resp = await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`);
-          if (resp && resp.ok) {
-            const data = await resp.json();
-            return { source: 'coingecko', coin_id: coinId, price: parseFloat(data[coinId]?.usd || 0) };
-          }
-        } catch {}
+        // 1. Binance
+        const b = await fetchBinancePrice(symbol);
+        if (b) { log('info', 'price_source_used', { source: 'binance', coin: coinId }); return b; }
+        log('warn', 'binance_price_failed', { coin: coinId });
+
+        // 2. CoinGecko 降级
+        const cg = await fetchCoinGeckoPrice(coinId);
+        if (cg) { log('info', 'price_source_used', { source: 'coingecko', coin: coinId }); return cg; }
+        log('warn', 'coingecko_price_failed', { coin: coinId });
+
+        // 3. CoinCap 兜底
+        const cc = await fetchCoinCapPrice(coinId);
+        if (cc) { log('info', 'price_source_used', { source: 'coincap', coin: coinId }); return cc; }
+        log('error', 'all_price_sources_failed', { coin: coinId });
+
         return null;
       });
 
@@ -280,21 +333,39 @@ export default {
       const cacheKey = `prices:${coins.sort().join(',')}`;
 
       response = await cachedResponse(request, cacheKey, CONFIG.PRICE_CACHE_TTL, async () => {
-        try {
-          const resp = await fetchWithRetry(
-            `https://api.binance.com/api/v3/ticker/price?symbols=${encodeURIComponent(JSON.stringify(symbols))}`
-          );
-          if (resp) {
-            const data = await resp.json();
-            const result = {};
-            coins.forEach(c => {
-              const sym = COIN_TO_BINANCE[c];
-              const item = data.find(d => d.symbol === sym);
-              if (item) result[c] = parseFloat(item.price);
-            });
+        const resp = await fetchWithRetry(
+          `https://api.binance.com/api/v3/ticker/price?symbols=${encodeURIComponent(JSON.stringify(symbols))}`
+        );
+        if (resp) {
+          const data = await resp.json();
+          const result = {};
+          coins.forEach(c => {
+            const sym = COIN_TO_BINANCE[c];
+            const item = data.find(d => d.symbol === sym);
+            if (item) result[c] = parseFloat(item.price);
+          });
+          if (Object.keys(result).length > 0) {
             return { source: 'binance', prices: result };
           }
-        } catch {}
+        }
+        log('warn', 'binance_prices_failed', { coins });
+
+        // 降级：逐个走 CoinGecko/CoinCap（并发）
+        const fallbackResults = await Promise.all(
+          coins.map(async c => {
+            const cg = await fetchCoinGeckoPrice(c);
+            if (cg) return [c, cg.price];
+            const cc = await fetchCoinCapPrice(c);
+            if (cc) return [c, cc.price];
+            return [c, null];
+          })
+        );
+        const result = {};
+        fallbackResults.forEach(([c, p]) => { if (p !== null) result[c] = p; });
+        if (Object.keys(result).length > 0) {
+          return { source: 'mixed_fallback', prices: result };
+        }
+        log('error', 'all_prices_sources_failed', { coins });
         return null;
       });
 
@@ -307,17 +378,16 @@ export default {
     else if (path === '/api/coins') {
       const cacheKey = 'top_coins';
       response = await cachedResponse(request, cacheKey, 3600, async () => {
-        try {
-          const resp = await fetchWithRetry(
-            `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false`
-          );
-          if (resp) {
-            const data = await resp.json();
-            const coins = {};
-            data.forEach(c => { coins[`${c.name} (${c.symbol.toUpperCase()})`] = c.id; });
-            return { source: 'coingecko', count: Object.keys(coins).length, coins };
-          }
-        } catch {}
+        const resp = await fetchWithRetry(
+          `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false`
+        );
+        if (resp) {
+          const data = await resp.json();
+          const coins = {};
+          data.forEach(c => { coins[`${c.name} (${c.symbol.toUpperCase()})`] = c.id; });
+          return { source: 'coingecko', count: Object.keys(coins).length, coins };
+        }
+        log('error', 'coins_list_failed', {});
         return null;
       });
 
