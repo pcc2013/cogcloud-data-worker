@@ -1,4 +1,4 @@
-name = "cogcloud-data"
+name = "cogcloud-data-worker"
 main = "worker.js"
 compatibility_date = "2026-07-03"
 
