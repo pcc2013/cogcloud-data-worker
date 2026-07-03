@@ -1,0 +1,6 @@
+name = "cogcloud-data"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+AUTH_TOKEN = "cogcloud-internal-2026"
