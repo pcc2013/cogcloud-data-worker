@@ -5,7 +5,7 @@ const CONFIG = {
   MAX_RETRIES: 3,
   TIMEOUT: 8000,
   RATE_LIMIT: 100,          // 每分钟/ip
-  AUTH_TOKEN: AUTH_TOKEN,   // 从环境变量注入
+   AUTH_TOKEN: null,    // 从环境变量注入
   CORS_ORIGINS: ['https://huggingface.co', 'https://qisuanai.com', 'https://chainsight.qisuanai.com'],
 };
 
@@ -198,7 +198,7 @@ export default {
 
     // 认证
     const auth = url.searchParams.get('token') || request.headers.get('Authorization')?.replace('Bearer ', '');
-    if (CONFIG.AUTH_TOKEN && auth !== CONFIG.AUTH_TOKEN) {
+    if (env.AUTH_TOKEN && auth !== env.AUTH_TOKEN) {
       log('warn', 'auth_failed', { ip });
       return errorResponse(401, 'UNAUTHORIZED');
     }
