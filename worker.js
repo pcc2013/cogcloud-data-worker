@@ -1,38 +1,49 @@
-// cogcloud-data-worker.js 
-const CONFIG = {
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// worker.js
+var CONFIG = {
   CACHE_TTL: 120,
   PRICE_CACHE_TTL: 30,
   MAX_RETRIES: 3,
-  TIMEOUT_DEFAULT: 8000,
-  TIMEOUT_PYTH: 2000,        
-  TIMEOUT_COINGECKO: 5000,   
-  TIMEOUT_COINCAP: 3000,
+  TIMEOUT_DEFAULT: 8e3,
+  TIMEOUT_PYTH: 2e3,
+  TIMEOUT_COINGECKO: 5e3,
+  TIMEOUT_COINCAP: 3e3,
   RATE_LIMIT: 100,
   AUTH_TOKEN: null,
-  PRICE_DEVIATION_THRESHOLD: 0.005,
-  DEGRADATION_ALERT_THRESHOLD: 10, 
+  PRICE_DEVIATION_THRESHOLD: 5e-3,
+  DEGRADATION_ALERT_THRESHOLD: 10,
   CORS_ORIGINS: [
-    'https://huggingface.co',
-    'https://qisuanai.com',
-    'https://chainsight.qisuanai.com',
-  ],
+    "https://huggingface.co",
+    "https://qisuanai.com",
+    "https://chainsight.qisuanai.com"
+  ]
 };
-
-// ============================================================================
-// 币种映射
-// ============================================================================
-const COIN_TO_COINCAP = {
-  "bitcoin": "bitcoin", "ethereum": "ethereum", "solana": "solana",
-  "binancecoin": "binance-coin", "ripple": "xrp", "cardano": "cardano",
-  "dogecoin": "dogecoin", "avalanche-2": "avalanche", "polkadot": "polkadot",
-  "matic-network": "polygon", "chainlink": "chainlink", "uniswap": "uniswap",
-  "litecoin": "litecoin", "shiba-inu": "shiba-inu", "tron": "tron",
-  "stellar": "stellar", "hedera-hashgraph": "hedera-hashgraph",
-  "ethereum-classic": "ethereum-classic", "near": "near-protocol",
-  "cosmos": "cosmos", "filecoin": "filecoin",
+var COIN_TO_COINCAP = {
+  "bitcoin": "bitcoin",
+  "ethereum": "ethereum",
+  "solana": "solana",
+  "binancecoin": "binance-coin",
+  "ripple": "xrp",
+  "cardano": "cardano",
+  "dogecoin": "dogecoin",
+  "avalanche-2": "avalanche",
+  "polkadot": "polkadot",
+  "matic-network": "polygon",
+  "chainlink": "chainlink",
+  "uniswap": "uniswap",
+  "litecoin": "litecoin",
+  "shiba-inu": "shiba-inu",
+  "tron": "tron",
+  "stellar": "stellar",
+  "hedera-hashgraph": "hedera-hashgraph",
+  "ethereum-classic": "ethereum-classic",
+  "near": "near-protocol",
+  "cosmos": "cosmos",
+  "filecoin": "filecoin"
 };
-
-const PYTH_PRICE_IDS = {
+var PYTH_PRICE_IDS = {
   "BTCUSDT": "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
   "ETHUSDT": "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
   "SOLUSDT": "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
@@ -47,33 +58,34 @@ const PYTH_PRICE_IDS = {
   "UNIUSDT": "0x78d185a741d07edb3412b09008b7c5cfb9bbbd7d568bf00ba737b456ba171501",
   "LTCUSDT": "0x6e3f3fa8253588df93265801802398ebcda6f23c4ce26e6c9641e6e298f7b2b9",
   "SHIBUSDT": "0xf0d57deca57b3da2fe63a493f4c25925fdfd8edf834b20f93e1f84dbd1504d4b",
-  "TRXUSDT": "0x67aed5a24fdad045475e7195c98a98aea119c763f272d4523f5bac93a4f33c2b",
+  "TRXUSDT": "0x67aed5a24fdad045475e7195c98a98aea119c763f272d4523f5bac93a4f33c2b"
 };
-
-const PYTH_SUPPORTED = new Set(Object.keys(PYTH_PRICE_IDS));
-
-// ============================================================================
-// 降级计数器（单实例内存，Worker 重启清零）
-// ============================================================================
-class DegradationCounter {
-  constructor(windowMs = 600000, threshold = 10) {
+var PYTH_SUPPORTED = new Set(Object.keys(PYTH_PRICE_IDS));
+var DegradationCounter = class {
+  static {
+    __name(this, "DegradationCounter");
+  }
+  constructor(windowMs = 6e5, threshold = 10) {
     this.window = windowMs;
     this.threshold = threshold;
-    this.counters = new Map(); // key -> { count, reset }
+    this.counters = /* @__PURE__ */ new Map();
   }
   increment(source, target) {
     const key = `${source}->${target}`;
     const now = Date.now();
     const record = this.counters.get(key) || { count: 0, reset: now + this.window };
-    if (now > record.reset) { record.count = 0; record.reset = now + this.window; }
+    if (now > record.reset) {
+      record.count = 0;
+      record.reset = now + this.window;
+    }
     record.count++;
     this.counters.set(key, record);
     if (record.count >= this.threshold) {
-      log('alert', 'degradation_threshold_exceeded', {
+      log("alert", "degradation_threshold_exceeded", {
         from: source,
         to: target,
         count: record.count,
-        window_ms: this.window,
+        window_ms: this.window
       });
     }
   }
@@ -85,66 +97,55 @@ class DegradationCounter {
     });
     return stats;
   }
-}
-const degradationCounter = new DegradationCounter(
-  600000,
+};
+var degradationCounter = new DegradationCounter(
+  6e5,
   CONFIG.DEGRADATION_ALERT_THRESHOLD
 );
-
-// ============================================================================
-// 限流器
-// ============================================================================
-class RateLimiter {
+var RateLimiter = class {
+  static {
+    __name(this, "RateLimiter");
+  }
   constructor(max, win) {
     this.max = max;
     this.window = win;
-    this.store = new Map();
+    this.store = /* @__PURE__ */ new Map();
   }
   check(ip) {
     const now = Date.now();
     const record = this.store.get(ip) || { count: 0, reset: now + this.window };
-    if (now > record.reset) { record.count = 0; record.reset = now + this.window; }
+    if (now > record.reset) {
+      record.count = 0;
+      record.reset = now + this.window;
+    }
     record.count++;
     this.store.set(ip, record);
     return record.count <= this.max;
   }
-}
-const limiter = new RateLimiter(CONFIG.RATE_LIMIT, 60000);
-
-// ============================================================================
-// 结构化日志
-// ============================================================================
+};
+var limiter = new RateLimiter(CONFIG.RATE_LIMIT, 6e4);
 function log(level, message, extra = {}) {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), level, message, ...extra }));
+  console.log(JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), level, message, ...extra }));
 }
-
-// ============================================================================
-// 错误响应
-// ============================================================================
+__name(log, "log");
 function errRes(code, detail) {
   return Response.json(
-    { error: { code, detail, ts: new Date().toISOString() } },
+    { error: { code, detail, ts: (/* @__PURE__ */ new Date()).toISOString() } },
     { status: code }
   );
 }
-
-// ============================================================================
-// CORS 头
-// ============================================================================
+__name(errRes, "errRes");
 function corsHdrs(request) {
-  const origin = request.headers.get('Origin') || '';
+  const origin = request.headers.get("Origin") || "";
   const allowed = CONFIG.CORS_ORIGINS.includes(origin) ? origin : CONFIG.CORS_ORIGINS[0];
   return {
-    'Access-Control-Allow-Origin': allowed,
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-    'Access-Control-Max-Age': '86400',
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Max-Age": "86400"
   };
 }
-
-// ============================================================================
-// 带超时 fetch（支持差异化超时）
-// ============================================================================
+__name(corsHdrs, "corsHdrs");
 async function fetchTO(url, opts = {}, timeout = CONFIG.TIMEOUT_DEFAULT) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -154,78 +155,59 @@ async function fetchTO(url, opts = {}, timeout = CONFIG.TIMEOUT_DEFAULT) {
     clearTimeout(timer);
   }
 }
-
-// ============================================================================
-// 带重试 fetch
-// ============================================================================
+__name(fetchTO, "fetchTO");
 async function fetchRetry(url, opts = {}, retries = CONFIG.MAX_RETRIES, timeout = CONFIG.TIMEOUT_DEFAULT) {
   for (let i = 0; i < retries; i++) {
     try {
       const resp = await fetchTO(url, opts, timeout);
       if (resp.status === 429) {
-        log('warn', 'rate_limited_upstream', { url, attempt: i + 1 });
-        await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+        log("warn", "rate_limited_upstream", { url, attempt: i + 1 });
+        await new Promise((r) => setTimeout(r, 2e3 * (i + 1)));
         continue;
       }
       if (resp.status === 451) {
-        log('warn', 'geo_blocked', { url });
+        log("warn", "geo_blocked", { url });
         return null;
       }
       if (!resp.ok) {
-        log('warn', 'fetch_failed', { url, status: resp.status, attempt: i + 1 });
+        log("warn", "fetch_failed", { url, status: resp.status, attempt: i + 1 });
         continue;
       }
       return resp;
     } catch (e) {
-      log('warn', 'fetch_error', { url, error: e.message, attempt: i + 1 });
+      log("warn", "fetch_error", { url, error: e.message, attempt: i + 1 });
     }
   }
   return null;
 }
-
-// ============================================================================
-// 价格一致性校验
-// 输入多个价格源的结果 [{ source, price }, ...]
-// 返回：{ price, source, consensus } 或 null
-// ============================================================================
+__name(fetchRetry, "fetchRetry");
 function validatePriceConsensus(prices) {
   if (prices.length === 0) return null;
-  if (prices.length === 1) return { ...prices[0], consensus: 'single_source' };
-
-  const values = prices.map(p => p.price);
+  if (prices.length === 1) return { ...prices[0], consensus: "single_source" };
+  const values = prices.map((p) => p.price);
   const median = values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
-
-  // 检查每个价格与中位数的偏差
-  const deviations = prices.map(p => ({
+  const deviations = prices.map((p) => ({
     ...p,
-    deviation: Math.abs(p.price - median) / median,
+    deviation: Math.abs(p.price - median) / median
   }));
-
-  const maxDeviation = Math.max(...deviations.map(d => d.deviation));
-
+  const maxDeviation = Math.max(...deviations.map((d) => d.deviation));
   if (maxDeviation > CONFIG.PRICE_DEVIATION_THRESHOLD) {
-    log('warn', 'price_deviation_detected', {
-      prices: prices.map(p => ({ source: p.source, price: p.price })),
+    log("warn", "price_deviation_detected", {
+      prices: prices.map((p) => ({ source: p.source, price: p.price })),
       median,
-      max_deviation: maxDeviation,
+      max_deviation: maxDeviation
     });
   }
-
-  // 取最接近中位数的源作为最终价格
-  const best = deviations.reduce((a, b) => (a.deviation <= b.deviation ? a : b));
-
+  const best = deviations.reduce((a, b) => a.deviation <= b.deviation ? a : b);
   return {
     price: best.price,
     source: best.source,
-    consensus: prices.length >= 2 ? 'multi_source_verified' : 'single_source',
-    all_sources: prices.map(p => p.source),
-    deviation: maxDeviation,
+    consensus: prices.length >= 2 ? "multi_source_verified" : "single_source",
+    all_sources: prices.map((p) => p.source),
+    deviation: maxDeviation
   };
 }
-
-// ============================================================================
-// 数据获取 — OHLC
-// ============================================================================
+__name(validatePriceConsensus, "validatePriceConsensus");
 async function fetchCoinGeckoOHLC(coinId, days) {
   const start = Date.now();
   const resp = await fetchRetry(
@@ -238,24 +220,21 @@ async function fetchCoinGeckoOHLC(coinId, days) {
   const data = await resp.json();
   if (!Array.isArray(data) || data.length === 0) return null;
   return {
-    source: 'coingecko',
+    source: "coingecko",
     coin_id: coinId,
     days,
     latency_ms: Date.now() - start,
-    data: data.map(d => ({
+    data: data.map((d) => ({
       timestamp: d[0],
       open: d[1],
       high: d[2],
       low: d[3],
       close: d[4],
-      volume: 0,
-    })),
+      volume: 0
+    }))
   };
 }
-
-// ============================================================================
-// 数据获取 — 实时价格
-// ============================================================================
+__name(fetchCoinGeckoOHLC, "fetchCoinGeckoOHLC");
 async function fetchPythPrice(symbol) {
   const priceId = PYTH_PRICE_IDS[symbol];
   if (!priceId) return null;
@@ -271,13 +250,13 @@ async function fetchPythPrice(symbol) {
   const parsed = data?.parsed?.[0]?.price;
   if (!parsed) return null;
   return {
-    source: 'pyth',
+    source: "pyth",
     symbol,
     price: parseFloat(parsed.price) * Math.pow(10, parsed.expo),
-    latency_ms: Date.now() - start,
+    latency_ms: Date.now() - start
   };
 }
-
+__name(fetchPythPrice, "fetchPythPrice");
 async function fetchCoinGeckoPrice(coinId) {
   const start = Date.now();
   const resp = await fetchRetry(
@@ -291,13 +270,13 @@ async function fetchCoinGeckoPrice(coinId) {
   const price = data[coinId]?.usd;
   if (!price) return null;
   return {
-    source: 'coingecko',
+    source: "coingecko",
     coin_id: coinId,
     price: parseFloat(price),
-    latency_ms: Date.now() - start,
+    latency_ms: Date.now() - start
   };
 }
-
+__name(fetchCoinGeckoPrice, "fetchCoinGeckoPrice");
 async function fetchCoinCapPrice(coinId) {
   const capId = COIN_TO_COINCAP[coinId] || coinId;
   const start = Date.now();
@@ -312,264 +291,243 @@ async function fetchCoinCapPrice(coinId) {
   const price = data?.data?.priceUsd;
   if (!price) return null;
   return {
-    source: 'coincap',
+    source: "coincap",
     coin_id: coinId,
     price: parseFloat(price),
-    latency_ms: Date.now() - start,
+    latency_ms: Date.now() - start
   };
 }
-
-// ============================================================================
-// 多源价格获取 + 一致性校验
-// 返回：{ price, source, consensus, all_sources, deviation } 或 null
-// ============================================================================
+__name(fetchCoinCapPrice, "fetchCoinCapPrice");
 async function fetchPriceWithConsensus(coinId, symbol) {
   const results = [];
-
-  // 1. Pyth（主力）
   if (PYTH_SUPPORTED.has(symbol)) {
     const pythResult = await fetchPythPrice(symbol);
     if (pythResult) {
       results.push(pythResult);
-      log('info', 'price_source_available', { source: 'pyth', coin: coinId });
+      log("info", "price_source_available", { source: "pyth", coin: coinId });
     } else {
-      log('warn', 'pyth_price_failed', { coin: coinId });
-      degradationCounter.increment('pyth', 'coingecko');
+      log("warn", "pyth_price_failed", { coin: coinId });
+      degradationCounter.increment("pyth", "coingecko");
     }
   }
-
-  // 2. CoinGecko
   const cgResult = await fetchCoinGeckoPrice(coinId);
   if (cgResult) {
     results.push(cgResult);
-    log('info', 'price_source_available', { source: 'coingecko', coin: coinId });
+    log("info", "price_source_available", { source: "coingecko", coin: coinId });
   } else {
-    log('warn', 'coingecko_price_failed', { coin: coinId });
-    degradationCounter.increment('coingecko', 'coincap');
+    log("warn", "coingecko_price_failed", { coin: coinId });
+    degradationCounter.increment("coingecko", "coincap");
   }
-
-  // 3. CoinCap（兜底）
   if (results.length === 0) {
     const ccResult = await fetchCoinCapPrice(coinId);
     if (ccResult) {
       results.push(ccResult);
-      log('info', 'price_source_available', { source: 'coincap', coin: coinId });
+      log("info", "price_source_available", { source: "coincap", coin: coinId });
     }
   }
-
   if (results.length === 0) {
-    log('error', 'all_price_sources_failed', { coin: coinId });
+    log("error", "all_price_sources_failed", { coin: coinId });
     return null;
   }
-
-  // 一致性校验
   return validatePriceConsensus(results);
 }
-
-// ============================================================================
-// 缓存辅助（自包含，防御性设计）
-// ============================================================================
+__name(fetchPriceWithConsensus, "fetchPriceWithConsensus");
 async function cachedResp(request, cacheKey, ttl, fetcher) {
   try {
     const cache = caches.default;
     const hit = await cache.match(request);
     if (hit) {
-      log('info', 'cache_hit', { key: cacheKey });
+      log("info", "cache_hit", { key: cacheKey });
       return hit;
     }
-
     const data = await fetcher();
     if (!data) return null;
-
     const resp = Response.json(data);
-    resp.headers.set('Cache-Control', `public, max-age=${ttl}`);
-
+    resp.headers.set("Cache-Control", `public, max-age=${ttl}`);
     const cacheUrl = new URL(request.url);
     cacheUrl.search = `cache_key=${cacheKey}`;
     const cacheReq = new Request(cacheUrl.toString(), request);
-
     try {
       await cache.put(cacheReq, resp.clone());
     } catch (e) {
-      log('warn', 'cache_write_failed', { key: cacheKey, error: e.message });
+      log("warn", "cache_write_failed", { key: cacheKey, error: e.message });
     }
-
-    log('info', 'cache_miss', { key: cacheKey });
+    log("info", "cache_miss", { key: cacheKey });
     return resp;
   } catch (e) {
-    log('error', 'cache_layer_crash', { key: cacheKey, error: e.message });
+    log("error", "cache_layer_crash", { key: cacheKey, error: e.message });
     const data = await fetcher();
     if (!data) return null;
     return Response.json(data);
   }
 }
-
-// ============================================================================
-// 上游源健康检查
-// ============================================================================
+__name(cachedResp, "cachedResp");
 async function checkUpstreamHealth() {
   const results = {};
-
-  // Pyth
   const pythStart = Date.now();
   try {
-    const pythResp = await fetchPythPrice('BTCUSDT');
+    const pythResp = await fetchPythPrice("BTCUSDT");
     results.pyth = {
-      status: pythResp ? 'healthy' : 'unhealthy',
-      latency_ms: Date.now() - pythStart,
+      status: pythResp ? "healthy" : "unhealthy",
+      latency_ms: Date.now() - pythStart
     };
   } catch (e) {
-    results.pyth = { status: 'error', latency_ms: Date.now() - pythStart, error: e.message };
+    results.pyth = { status: "error", latency_ms: Date.now() - pythStart, error: e.message };
   }
-
-  // CoinGecko
   const cgStart = Date.now();
   try {
-    const cgResp = await fetchCoinGeckoPrice('bitcoin');
+    const cgResp = await fetchCoinGeckoPrice("bitcoin");
     results.coingecko = {
-      status: cgResp ? 'healthy' : 'unhealthy',
-      latency_ms: Date.now() - cgStart,
+      status: cgResp ? "healthy" : "unhealthy",
+      latency_ms: Date.now() - cgStart
     };
   } catch (e) {
-    results.coingecko = { status: 'error', latency_ms: Date.now() - cgStart, error: e.message };
+    results.coingecko = { status: "error", latency_ms: Date.now() - cgStart, error: e.message };
   }
-
-  // CoinCap
   const ccStart = Date.now();
   try {
-    const ccResp = await fetchCoinCapPrice('bitcoin');
+    const ccResp = await fetchCoinCapPrice("bitcoin");
     results.coincap = {
-      status: ccResp ? 'healthy' : 'unhealthy',
-      latency_ms: Date.now() - ccStart,
+      status: ccResp ? "healthy" : "unhealthy",
+      latency_ms: Date.now() - ccStart
     };
   } catch (e) {
-    results.coincap = { status: 'error', latency_ms: Date.now() - ccStart, error: e.message };
+    results.coincap = { status: "error", latency_ms: Date.now() - ccStart, error: e.message };
   }
-
   return results;
 }
-
-// ============================================================================
-// 静态兜底
-// ============================================================================
-const STATIC_COINS = {
+__name(checkUpstreamHealth, "checkUpstreamHealth");
+var STATIC_COINS = {
   "Bitcoin (BTC)": "bitcoin",
   "Ethereum (ETH)": "ethereum",
-  "Solana (SOL)": "solana",
+  "Solana (SOL)": "solana"
 };
 
-// ============================================================================
-// 主入口（全局异常兜底）
-// ============================================================================
-export default {
+// ==================== 🆕 Etherscan 代理路由 ====================
+async function handleEtherscanProxy(request, env) {
+  const url = new URL(request.url);
+  const action = url.searchParams.get('action') || 'gasoracle';
+  const apiKey = env.ETHERSCAN_API_KEY;
+
+  if (!apiKey) {
+    log("error", "etherscan_no_api_key");
+    return errRes(500, "ETHERSCAN_NOT_CONFIGURED");
+  }
+
+  let upstreamUrl;
+  switch (action) {
+    case 'gasoracle':
+      upstreamUrl = `https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey=${apiKey}`;
+      break;
+    default:
+      return errRes(400, `UNKNOWN_ETHERSCAN_ACTION: ${action}`);
+  }
+
+  const start = Date.now();
+  const resp = await fetchRetry(upstreamUrl, {}, 2, CONFIG.TIMEOUT_DEFAULT);
+  if (!resp) {
+    log("error", "etherscan_upstream_failed", { action });
+    return errRes(502, "ETHERSCAN_UPSTREAM_FAILED");
+  }
+
+  const data = await resp.json();
+  log("info", "etherscan_proxy_success", { action, latency_ms: Date.now() - start });
+
+  return Response.json(data, {
+    headers: {
+      "Cache-Control": "public, max-age=15",
+      "CDN-Cache-Control": "public, max-age=15"
+    }
+  });
+}
+__name(handleEtherscanProxy, "handleEtherscanProxy");
+// ==================== 🆕 Etherscan 代理路由结束 ====================
+
+var worker_default = {
   async fetch(request, env, ctx) {
     const startTs = Date.now();
     let response;
     try {
       response = await handleRequest(request, env, ctx);
     } catch (e) {
-      log('error', 'worker_panic', {
+      log("error", "worker_panic", {
         error: e.message,
         stack: e.stack,
-        total_latency_ms: Date.now() - startTs,
+        total_latency_ms: Date.now() - startTs
       });
-      response = errRes(500, 'INTERNAL_ERROR');
+      response = errRes(500, "INTERNAL_ERROR");
     }
-
     const headers = corsHdrs(request);
     const finalHeaders = new Headers(response.headers);
     Object.entries(headers).forEach(([k, v]) => finalHeaders.set(k, v));
-    finalHeaders.set('X-Powered-By', 'CogCloud Data Worker v6.0');
-    finalHeaders.set('X-Response-Time-Ms', String(Date.now() - startTs));
-
+    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v6.1");
+    finalHeaders.set("X-Response-Time-Ms", String(Date.now() - startTs));
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: finalHeaders,
+      headers: finalHeaders
     });
-  },
+  }
 };
-
 async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-
-  if (request.method === 'OPTIONS') {
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHdrs(request) });
   }
-
-  // =========================================================================
-  // 认证 — 仅允许 Header 传 Token（不允许 URL 参数）
-  // =========================================================================
-  const authHeader = request.headers.get('Authorization')?.replace('Bearer ', '');
+  const authHeader = request.headers.get("Authorization")?.replace("Bearer ", "");
   if (env.AUTH_TOKEN && authHeader !== env.AUTH_TOKEN) {
-    log('warn', 'auth_failed', { ip, has_header: !!authHeader });
-    return errRes(401, 'UNAUTHORIZED');
+    log("warn", "auth_failed", { ip, has_header: !!authHeader });
+    return errRes(401, "UNAUTHORIZED");
   }
-
-  // =========================================================================
-  // 限流
-  // =========================================================================
   if (!limiter.check(ip)) {
-    log('warn', 'rate_limited', { ip });
-    return errRes(429, 'RATE_LIMITED');
+    log("warn", "rate_limited", { ip });
+    return errRes(429, "RATE_LIMITED");
   }
 
-  // =========================================================================
-  // 路由
-  // =========================================================================
+  // ==================== 🆕 Etherscan 路由 ====================
+  if (path === "/api/etherscan") {
+    return handleEtherscanProxy(request, env);
+  }
+  // ==================== 🆕 Etherscan 路由结束 ====================
 
-  // ── 健康检查（增强版：含上游源状态） ──
-  if (path === '/health') {
+  if (path === "/health") {
     const upstream = await checkUpstreamHealth();
     const degradationStats = degradationCounter.getStats();
-    const overallStatus = Object.values(upstream).some(s => s.status === 'healthy')
-      ? 'ok'
-      : 'degraded';
-
+    const overallStatus = Object.values(upstream).some((s) => s.status === "healthy") ? "ok" : "degraded";
     return Response.json({
       status: overallStatus,
-      ts: new Date().toISOString(),
-      uptime_seconds: Math.floor(performance.now() / 1000),
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      uptime_seconds: Math.floor(performance.now() / 1e3),
       upstream,
-      degradation_stats: degradationStats,
+      degradation_stats: degradationStats
     });
   }
-
-  // ── OHLC 数据（CoinGecko 主力 → 降级兜底） ──
-  if (path === '/api/ohlc') {
-    const coinId = url.searchParams.get('coin_id') || 'bitcoin';
-    const days = parseInt(url.searchParams.get('days') || '30');
-    const period = url.searchParams.get('period') || '1d';
-    const limit = parseInt(url.searchParams.get('limit') || '500');
+  if (path === "/api/ohlc") {
+    const coinId = url.searchParams.get("coin_id") || "bitcoin";
+    const days = parseInt(url.searchParams.get("days") || "30");
+    const period = url.searchParams.get("period") || "1d";
+    const limit = parseInt(url.searchParams.get("limit") || "500");
     const cacheKey = `ohlc:${coinId}:${period}:${limit}`;
-
     let r = await cachedResp(request, cacheKey, CONFIG.CACHE_TTL, async () => {
-      // 1. CoinGecko 主力
       const cgResult = await fetchCoinGeckoOHLC(coinId, days);
       if (cgResult) {
-        log('info', 'ohlc_source', { source: 'coingecko', coin: coinId });
+        log("info", "ohlc_source", { source: "coingecko", coin: coinId });
         return cgResult;
       }
-      log('warn', 'coingecko_ohlc_failed', { coin: coinId });
-      degradationCounter.increment('coingecko_ohlc', 'fallback');
-
-      // 2. 降级兜底：返回空数据 + 错误标记（前端据此展示降级状态）
-      log('error', 'all_ohlc_sources_failed', { coin: coinId });
+      log("warn", "coingecko_ohlc_failed", { coin: coinId });
+      degradationCounter.increment("coingecko_ohlc", "fallback");
+      log("error", "all_ohlc_sources_failed", { coin: coinId });
       return null;
     });
-
-    if (!r) r = errRes(502, 'OHLC_FETCH_FAILED');
+    if (!r) r = errRes(502, "OHLC_FETCH_FAILED");
     return r;
   }
-
-  // ── 实时价格（Pyth → CoinGecko → CoinCap + 一致性校验） ──
-  if (path === '/api/price') {
-    const coinId = url.searchParams.get('coin_id') || 'bitcoin';
-    const symbol = `${coinId.split('-')[0].toUpperCase()}USDT`;
+  if (path === "/api/price") {
+    const coinId = url.searchParams.get("coin_id") || "bitcoin";
+    const symbol = `${coinId.split("-")[0].toUpperCase()}USDT`;
     const cacheKey = `price:${coinId}`;
-
     let r = await cachedResp(request, cacheKey, CONFIG.PRICE_CACHE_TTL, async () => {
       const result = await fetchPriceWithConsensus(coinId, symbol);
       if (result) {
@@ -580,70 +538,56 @@ async function handleRequest(request, env, ctx) {
           source: result.source,
           consensus: result.consensus,
           all_sources: result.all_sources,
-          deviation: result.deviation || 0,
+          deviation: result.deviation || 0
         };
       }
       return null;
     });
-
-    if (!r) r = errRes(502, 'PRICE_FETCH_FAILED');
+    if (!r) r = errRes(502, "PRICE_FETCH_FAILED");
     return r;
   }
-
-  // ── 批量价格 ──
-  if (path === '/api/prices') {
-    const coins = (url.searchParams.get('coins') || 'bitcoin,ethereum').split(',').slice(0, 20);
-    const cacheKey = `prices:${coins.sort().join(',')}`;
-
+  if (path === "/api/prices") {
+    const coins = (url.searchParams.get("coins") || "bitcoin,ethereum").split(",").slice(0, 20);
+    const cacheKey = `prices:${coins.sort().join(",")}`;
     let r = await cachedResp(request, cacheKey, CONFIG.PRICE_CACHE_TTL, async () => {
       const results = await Promise.all(
         coins.map(async (c) => {
-          const sym = `${c.split('-')[0].toUpperCase()}USDT`;
-
+          const sym = `${c.split("-")[0].toUpperCase()}USDT`;
           if (PYTH_SUPPORTED.has(sym)) {
             const pythResult = await fetchPythPrice(sym);
             if (pythResult) return [c, pythResult.price];
           }
-
           const cgResult = await fetchCoinGeckoPrice(c);
           if (cgResult) return [c, cgResult.price];
-
           const ccResult = await fetchCoinCapPrice(c);
           if (ccResult) return [c, ccResult.price];
-
           return [c, null];
         })
       );
-
       const prices = {};
-      const sources = new Set();
+      const sources = /* @__PURE__ */ new Set();
       results.forEach(([coin, price]) => {
         if (price !== null) prices[coin] = price;
       });
-
       if (Object.keys(prices).length > 0) {
         return {
-          source: 'multi',
+          source: "multi",
           prices,
           fetched_count: Object.keys(prices).length,
-          total_requested: coins.length,
+          total_requested: coins.length
         };
       }
-      log('error', 'all_batch_prices_failed', { coins: coins.join(',') });
+      log("error", "all_batch_prices_failed", { coins: coins.join(",") });
       return null;
     });
-
-    if (!r) r = errRes(502, 'PRICES_FETCH_FAILED');
+    if (!r) r = errRes(502, "PRICES_FETCH_FAILED");
     return r;
   }
-
-  // ── 币种列表 ──
-  if (path === '/api/coins') {
-    const cacheKey = 'top_coins';
-
+  if (path === "/api/coins") {
+    const cacheKey = "top_coins";
     let r = await cachedResp(request, cacheKey, 3600, async () => {
       const resp = await fetchRetry(
-        'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false',
+        "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false",
         {},
         2,
         CONFIG.TIMEOUT_COINGECKO
@@ -652,23 +596,25 @@ async function handleRequest(request, env, ctx) {
         const data = await resp.json();
         if (Array.isArray(data)) {
           const coins = {};
-          data.forEach(c => {
+          data.forEach((c) => {
             coins[`${c.name} (${c.symbol.toUpperCase()})`] = c.id;
           });
-          return { source: 'coingecko', count: Object.keys(coins).length, coins };
+          return { source: "coingecko", count: Object.keys(coins).length, coins };
         }
       }
-      log('warn', 'coins_list_failed', {});
+      log("warn", "coins_list_failed", {});
       return null;
     });
-
     if (!r) {
-      r = Response.json({ source: 'static_fallback', count: 3, coins: STATIC_COINS });
+      r = Response.json({ source: "static_fallback", count: 3, coins: STATIC_COINS });
     }
     return r;
   }
-
-  // ── 404 ──
-  log('warn', 'route_not_found', { path, ip });
-  return errRes(404, 'NOT_FOUND');
+  log("warn", "route_not_found", { path, ip });
+  return errRes(404, "NOT_FOUND");
 }
+__name(handleRequest, "handleRequest");
+export {
+  worker_default as default
+};
+//# sourceMappingURL=worker.js.map
