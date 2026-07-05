@@ -521,35 +521,6 @@ async function handleFNG(request, env) {
 __name(handleFNG, "handleFNG");
 // ==================== Fear & Greed 代理路由结束 ====================
 
-// ==================== Binance 资金费率代理路由 ====================
-async function handleFunding(request, env) {
-  const url = new URL(request.url);
-  const symbols = (url.searchParams.get("symbols") || "BTCUSDT,ETHUSDT").split(",").slice(0, 5);
-  const start = Date.now();
-  const results = await Promise.all(
-    symbols.map(async function(sym) {
-      const resp = await fetchRetry(
-        `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${sym}`,
-        {}, 1, 3000
-      );
-      if (!resp) return [sym, null];
-      const data = await resp.json();
-      return [sym, {
-        symbol: data.symbol,
-        markPrice: data.markPrice,
-        lastFundingRate: data.lastFundingRate,
-        nextFundingTime: data.nextFundingTime
-      }];
-    })
-  );
-  const obj = {};
-  results.forEach(function(r) { obj[r[0]] = r[1]; });
-  log("info", "funding_success", { symbols: symbols.join(","), latency_ms: Date.now() - start });
-  return Response.json({ funding: obj, source: "binance" });
-}
-__name(handleFunding, "handleFunding");
-// ==================== Binance 资金费率代理路由结束 ====================
-
 // ==================== GoPlus 安全扫描代理路由 ====================
 async function handleSecurity(request, env) {
   const url = new URL(request.url);
@@ -591,7 +562,7 @@ var worker_default = {
     const headers = corsHdrs(request);
     const finalHeaders = new Headers(response.headers);
     Object.entries(headers).forEach(([k, v]) => finalHeaders.set(k, v));
-    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v7.0");
+    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v8.0");
     finalHeaders.set("X-Response-Time-Ms", String(Date.now() - startTs));
     return new Response(response.body, {
       status: response.status,
@@ -817,29 +788,29 @@ async function handleRequest(request, env, ctx) {
     return r;
   }
 
-  // ===== Binance 资金费率 =====
-  if (path === "/api/funding") {
-    let r = await cachedResp(request, "funding:" + (url.searchParams.get("symbols") || "BTCUSDT,ETHUSDT"), 30, async () => {
-      const symbols = (url.searchParams.get("symbols") || "BTCUSDT,ETHUSDT").split(",").slice(0, 5);
-      const results = await Promise.all(
-        symbols.map(async function(sym) {
-          const resp = await fetchRetry(
-            `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${sym}`,
-            {}, 1, 3000
-          );
-          if (!resp) return [sym, null];
-          const data = await resp.json();
-          return [sym, {
-            symbol: data.symbol,
-            markPrice: data.markPrice,
-            lastFundingRate: data.lastFundingRate,
-            nextFundingTime: data.nextFundingTime
-          }];
-        })
-      );
-      const obj = {};
-      results.forEach(function(r) { obj[r[0]] = r[1]; });
-      return { funding: obj, source: "binance" };
+  // ===== Hyperliquid 资金费率 =====
+  if (path === "/api/funding-rate") {
+    let r = await cachedResp(request, "funding:hyperliquid", 30, async () => {
+      const resp = await fetchRetry("https://api.hyperliquid.xyz/info", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: "metaAndAssetCtxs" })
+      }, 2, 5000);
+      if (!resp) return null;
+      const [meta, ctxs] = await resp.json();
+      const result = {};
+      for (let i = 0; i < meta.universe.length; i++) {
+        const coin = meta.universe[i].name;
+        if (coin === 'BTC' || coin === 'ETH') {
+          result[coin] = {
+            funding_rate: (parseFloat(ctxs[i].funding) * 100).toFixed(4) + '%',
+            premium: ctxs[i].premium,
+            oracle_price: ctxs[i].oraclePx,
+            mark_price: ctxs[i].markPx
+          };
+        }
+      }
+      return { funding: result, source: "hyperliquid" };
     });
     if (!r) r = errRes(502, "FUNDING_FAILED");
     return r;
