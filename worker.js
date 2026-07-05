@@ -403,7 +403,7 @@ var STATIC_COINS = {
   "Solana (SOL)": "solana"
 };
 
-// ==================== 🆕 Etherscan 代理路由 ====================
+// ==================== Etherscan 代理路由 ====================
 async function handleEtherscanProxy(request, env) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action') || 'gasoracle';
@@ -441,7 +441,7 @@ async function handleEtherscanProxy(request, env) {
   });
 }
 __name(handleEtherscanProxy, "handleEtherscanProxy");
-// ==================== 🆕 Etherscan 代理路由结束 ====================
+// ==================== Etherscan 代理路由结束 ====================
 
 var worker_default = {
   async fetch(request, env, ctx) {
@@ -476,6 +476,13 @@ async function handleRequest(request, env, ctx) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHdrs(request) });
   }
+
+  // ===== 公开路由（无需认证）=====
+  if (path === "/api/etherscan") {
+    return handleEtherscanProxy(request, env);
+  }
+  // ===== 公开路由结束 =====
+
   const authHeader = request.headers.get("Authorization")?.replace("Bearer ", "");
   if (env.AUTH_TOKEN && authHeader !== env.AUTH_TOKEN) {
     log("warn", "auth_failed", { ip, has_header: !!authHeader });
@@ -485,13 +492,6 @@ async function handleRequest(request, env, ctx) {
     log("warn", "rate_limited", { ip });
     return errRes(429, "RATE_LIMITED");
   }
-
-  // ==================== 🆕 Etherscan 路由 ====================
-  if (path === "/api/etherscan") {
-    return handleEtherscanProxy(request, env);
-  }
-  // ==================== 🆕 Etherscan 路由结束 ====================
-
   if (path === "/health") {
     const upstream = await checkUpstreamHealth();
     const degradationStats = degradationCounter.getStats();
