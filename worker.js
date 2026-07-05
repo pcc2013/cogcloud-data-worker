@@ -460,7 +460,7 @@ var worker_default = {
     const headers = corsHdrs(request);
     const finalHeaders = new Headers(response.headers);
     Object.entries(headers).forEach(([k, v]) => finalHeaders.set(k, v));
-    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v6.1");
+    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v6.2");
     finalHeaders.set("X-Response-Time-Ms", String(Date.now() - startTs));
     return new Response(response.body, {
       status: response.status,
@@ -469,41 +469,49 @@ var worker_default = {
     });
   }
 };
+
 async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+
+  // ===== 调试：返回 path 信息，排查路由问题 =====
+  if (path.includes("etherscan") || path === "/debug") {
+    return Response.json({
+      debug: true,
+      path: path,
+      full_url: request.url,
+      has_etherscan_key: !!env.ETHERSCAN_API_KEY,
+      etherscan_key_prefix: env.ETHERSCAN_API_KEY ? env.ETHERSCAN_API_KEY.substring(0, 8) + "..." : "MISSING",
+      timestamp: new Date().toISOString()
+    }, {
+      headers: corsHdrs(request)
+    });
+  }
+  // ===== 调试结束 =====
+
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHdrs(request) });
   }
 
-  // ===== 公开路由（无需认证）=====
-  if (path === "/api/etherscan") {
-    return handleEtherscanProxy(request, env);
-  }
-  // ===== 公开路由结束 =====
-
-  const authHeader = request.headers.get("Authorization")?.replace("Bearer ", "");
-  if (env.AUTH_TOKEN && authHeader !== env.AUTH_TOKEN) {
-    log("warn", "auth_failed", { ip, has_header: !!authHeader });
-    return errRes(401, "UNAUTHORIZED");
-  }
   if (!limiter.check(ip)) {
     log("warn", "rate_limited", { ip });
     return errRes(429, "RATE_LIMITED");
   }
+
   if (path === "/health") {
     const upstream = await checkUpstreamHealth();
     const degradationStats = degradationCounter.getStats();
     const overallStatus = Object.values(upstream).some((s) => s.status === "healthy") ? "ok" : "degraded";
     return Response.json({
       status: overallStatus,
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      ts: new Date().toISOString(),
       uptime_seconds: Math.floor(performance.now() / 1e3),
       upstream,
       degradation_stats: degradationStats
     });
   }
+
   if (path === "/api/ohlc") {
     const coinId = url.searchParams.get("coin_id") || "bitcoin";
     const days = parseInt(url.searchParams.get("days") || "30");
@@ -524,6 +532,7 @@ async function handleRequest(request, env, ctx) {
     if (!r) r = errRes(502, "OHLC_FETCH_FAILED");
     return r;
   }
+
   if (path === "/api/price") {
     const coinId = url.searchParams.get("coin_id") || "bitcoin";
     const symbol = `${coinId.split("-")[0].toUpperCase()}USDT`;
@@ -546,6 +555,7 @@ async function handleRequest(request, env, ctx) {
     if (!r) r = errRes(502, "PRICE_FETCH_FAILED");
     return r;
   }
+
   if (path === "/api/prices") {
     const coins = (url.searchParams.get("coins") || "bitcoin,ethereum").split(",").slice(0, 20);
     const cacheKey = `prices:${coins.sort().join(",")}`;
@@ -565,7 +575,6 @@ async function handleRequest(request, env, ctx) {
         })
       );
       const prices = {};
-      const sources = /* @__PURE__ */ new Set();
       results.forEach(([coin, price]) => {
         if (price !== null) prices[coin] = price;
       });
@@ -583,6 +592,7 @@ async function handleRequest(request, env, ctx) {
     if (!r) r = errRes(502, "PRICES_FETCH_FAILED");
     return r;
   }
+
   if (path === "/api/coins") {
     const cacheKey = "top_coins";
     let r = await cachedResp(request, cacheKey, 3600, async () => {
@@ -610,6 +620,7 @@ async function handleRequest(request, env, ctx) {
     }
     return r;
   }
+
   log("warn", "route_not_found", { path, ip });
   return errRes(404, "NOT_FOUND");
 }
@@ -617,4 +628,3 @@ __name(handleRequest, "handleRequest");
 export {
   worker_default as default
 };
-//# sourceMappingURL=worker.js.map
