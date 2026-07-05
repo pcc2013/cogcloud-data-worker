@@ -442,6 +442,138 @@ async function handleEtherscanProxy(request, env) {
 __name(handleEtherscanProxy, "handleEtherscanProxy");
 // ==================== Etherscan 代理路由结束 ====================
 
+// ==================== DeFiLlama 代理路由 ====================
+async function handleDeFiTVL(request, env) {
+  const start = Date.now();
+  const resp = await fetchRetry("https://api.llama.fi/v2/chains", {}, 2, 8000);
+  if (!resp) {
+    log("error", "defillama_tvl_failed");
+    return errRes(502, "DEFI_TVL_FAILED");
+  }
+  const chains = await resp.json();
+  let total = 0;
+  chains.forEach(function(c) { total += c.tvl || 0; });
+  log("info", "defillama_tvl_success", { total, chains: chains.length, latency_ms: Date.now() - start });
+  return Response.json({ total_tvl: total, chain_count: chains.length, source: "defillama" });
+}
+__name(handleDeFiTVL, "handleDeFiTVL");
+
+async function handleDeFiDEX(request, env) {
+  const start = Date.now();
+  const resp = await fetchRetry(
+    "https://api.llama.fi/overview/dexs?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true",
+    {}, 2, 8000
+  );
+  if (!resp) {
+    log("error", "defillama_dex_failed");
+    return errRes(502, "DEFI_DEX_FAILED");
+  }
+  const data = await resp.json();
+  log("info", "defillama_dex_success", { total24h: data.total24h, latency_ms: Date.now() - start });
+  return Response.json({ total_24h: data.total24h || 0, source: "defillama" });
+}
+__name(handleDeFiDEX, "handleDeFiDEX");
+
+async function handleDeFiProtocols(request, env) {
+  const start = Date.now();
+  const resp = await fetchRetry("https://api.llama.fi/protocols", {}, 2, 8000);
+  if (!resp) {
+    log("error", "defillama_protocols_failed");
+    return errRes(502, "DEFI_PROTOCOLS_FAILED");
+  }
+  const data = await resp.json();
+  log("info", "defillama_protocols_success", { count: data.length, latency_ms: Date.now() - start });
+  return Response.json({ top_protocol: data.length > 0 ? data[0].name : null, count: data.length, source: "defillama" });
+}
+__name(handleDeFiProtocols, "handleDeFiProtocols");
+
+async function handleDeFiStablecoins(request, env) {
+  const start = Date.now();
+  const resp = await fetchRetry(
+    "https://stablecoins.llama.fi/stablecoins?includePrices=false",
+    {}, 2, 8000
+  );
+  if (!resp) {
+    log("error", "defillama_stablecoins_failed");
+    return errRes(502, "DEFI_STABLECOINS_FAILED");
+  }
+  const data = await resp.json();
+  let total = 0;
+  (data.peggedAssets || []).forEach(function(a) { total += (a.circulating && a.circulating.peggedUSD) || 0; });
+  log("info", "defillama_stablecoins_success", { total, latency_ms: Date.now() - start });
+  return Response.json({ total_mcap: total, source: "defillama" });
+}
+__name(handleDeFiStablecoins, "handleDeFiStablecoins");
+// ==================== DeFiLlama 代理路由结束 ====================
+
+// ==================== Fear & Greed 代理路由 ====================
+async function handleFNG(request, env) {
+  const start = Date.now();
+  const resp = await fetchRetry("https://api.alternative.me/fng/?limit=1", {}, 2, 5000);
+  if (!resp) {
+    log("error", "fng_failed");
+    return errRes(502, "FNG_FAILED");
+  }
+  const data = await resp.json();
+  log("info", "fng_success", { latency_ms: Date.now() - start });
+  return Response.json(data.data ? data.data[0] : null);
+}
+__name(handleFNG, "handleFNG");
+// ==================== Fear & Greed 代理路由结束 ====================
+
+// ==================== Binance 资金费率代理路由 ====================
+async function handleFunding(request, env) {
+  const url = new URL(request.url);
+  const symbols = (url.searchParams.get("symbols") || "BTCUSDT,ETHUSDT").split(",").slice(0, 5);
+  const start = Date.now();
+  const results = await Promise.all(
+    symbols.map(async function(sym) {
+      const resp = await fetchRetry(
+        `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${sym}`,
+        {}, 1, 3000
+      );
+      if (!resp) return [sym, null];
+      const data = await resp.json();
+      return [sym, {
+        symbol: data.symbol,
+        markPrice: data.markPrice,
+        lastFundingRate: data.lastFundingRate,
+        nextFundingTime: data.nextFundingTime
+      }];
+    })
+  );
+  const obj = {};
+  results.forEach(function(r) { obj[r[0]] = r[1]; });
+  log("info", "funding_success", { symbols: symbols.join(","), latency_ms: Date.now() - start });
+  return Response.json({ funding: obj, source: "binance" });
+}
+__name(handleFunding, "handleFunding");
+// ==================== Binance 资金费率代理路由结束 ====================
+
+// ==================== GoPlus 安全扫描代理路由 ====================
+async function handleSecurity(request, env) {
+  const url = new URL(request.url);
+  const contract = url.searchParams.get("contract") || "0xdac17f958d2ee523a2206206994597c13d831ec7";
+  const chain = url.searchParams.get("chain") || "1";
+  const apiKey = env.GOPLUS_API_KEY || "";
+  const start = Date.now();
+  const headers = {};
+  if (apiKey) headers["Authorization"] = apiKey;
+  const resp = await fetchRetry(
+    `https://api.gopluslabs.io/api/v1/token_security/${chain}?contract_addresses=${contract}`,
+    { headers: headers }, 1, 8000
+  );
+  if (!resp) {
+    log("error", "goplus_failed", { contract: contract });
+    return errRes(502, "SECURITY_FAILED");
+  }
+  const data = await resp.json();
+  log("info", "goplus_success", { contract: contract, latency_ms: Date.now() - start });
+  return Response.json(data);
+}
+__name(handleSecurity, "handleSecurity");
+// ==================== GoPlus 安全扫描代理路由结束 ====================
+
 var worker_default = {
   async fetch(request, env, ctx) {
     const startTs = Date.now();
@@ -459,7 +591,7 @@ var worker_default = {
     const headers = corsHdrs(request);
     const finalHeaders = new Headers(response.headers);
     Object.entries(headers).forEach(([k, v]) => finalHeaders.set(k, v));
-    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v6.2");
+    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v7.0");
     finalHeaders.set("X-Response-Time-Ms", String(Date.now() - startTs));
     return new Response(response.body, {
       status: response.status,
@@ -474,21 +606,6 @@ async function handleRequest(request, env, ctx) {
   const path = url.pathname;
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
 
-  // ===== 调试：返回 path 信息，排查路由问题 =====
-  if (path.includes("etherscan") || path === "/debug") {
-    return Response.json({
-      debug: true,
-      path: path,
-      full_url: request.url,
-      has_etherscan_key: !!env.ETHERSCAN_API_KEY,
-      etherscan_key_prefix: env.ETHERSCAN_API_KEY ? env.ETHERSCAN_API_KEY.substring(0, 8) + "..." : "MISSING",
-      timestamp: new Date().toISOString()
-    }, {
-      headers: corsHdrs(request)
-    });
-  }
-  // ===== 调试结束 =====
-
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHdrs(request) });
   }
@@ -498,6 +615,7 @@ async function handleRequest(request, env, ctx) {
     return errRes(429, "RATE_LIMITED");
   }
 
+  // ===== 健康检查 =====
   if (path === "/health") {
     const upstream = await checkUpstreamHealth();
     const degradationStats = degradationCounter.getStats();
@@ -511,6 +629,7 @@ async function handleRequest(request, env, ctx) {
     });
   }
 
+  // ===== OHLC K线数据 =====
   if (path === "/api/ohlc") {
     const coinId = url.searchParams.get("coin_id") || "bitcoin";
     const days = parseInt(url.searchParams.get("days") || "30");
@@ -532,6 +651,7 @@ async function handleRequest(request, env, ctx) {
     return r;
   }
 
+  // ===== 单币价格（三源共识）=====
   if (path === "/api/price") {
     const coinId = url.searchParams.get("coin_id") || "bitcoin";
     const symbol = `${coinId.split("-")[0].toUpperCase()}USDT`;
@@ -555,6 +675,7 @@ async function handleRequest(request, env, ctx) {
     return r;
   }
 
+  // ===== 批量币价 =====
   if (path === "/api/prices") {
     const coins = (url.searchParams.get("coins") || "bitcoin,ethereum").split(",").slice(0, 20);
     const cacheKey = `prices:${coins.sort().join(",")}`;
@@ -592,6 +713,7 @@ async function handleRequest(request, env, ctx) {
     return r;
   }
 
+  // ===== 代币列表 =====
   if (path === "/api/coins") {
     const cacheKey = "top_coins";
     let r = await cachedResp(request, cacheKey, 3600, async () => {
@@ -617,6 +739,128 @@ async function handleRequest(request, env, ctx) {
     if (!r) {
       r = Response.json({ source: "static_fallback", count: 3, coins: STATIC_COINS });
     }
+    return r;
+  }
+
+  // ===== Etherscan Gas 代理 =====
+  if (path === "/api/gas") {
+    return handleEtherscanProxy(request, env);
+  }
+
+  // ===== DeFi TVL =====
+  if (path === "/api/defi/tvl") {
+    let r = await cachedResp(request, "defi:tvl", 120, async () => {
+      const resp = await fetchRetry("https://api.llama.fi/v2/chains", {}, 2, 8000);
+      if (!resp) return null;
+      const chains = await resp.json();
+      let total = 0;
+      chains.forEach(function(c) { total += c.tvl || 0; });
+      return { total_tvl: total, chain_count: chains.length, source: "defillama" };
+    });
+    if (!r) r = errRes(502, "DEFI_TVL_FAILED");
+    return r;
+  }
+
+  // ===== DeFi DEX Volume =====
+  if (path === "/api/defi/dex") {
+    let r = await cachedResp(request, "defi:dex", 300, async () => {
+      const resp = await fetchRetry(
+        "https://api.llama.fi/overview/dexs?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true",
+        {}, 2, 8000
+      );
+      if (!resp) return null;
+      const data = await resp.json();
+      return { total_24h: data.total24h || 0, source: "defillama" };
+    });
+    if (!r) r = errRes(502, "DEFI_DEX_FAILED");
+    return r;
+  }
+
+  // ===== DeFi Top Protocol =====
+  if (path === "/api/defi/protocols") {
+    let r = await cachedResp(request, "defi:protocols", 300, async () => {
+      const resp = await fetchRetry("https://api.llama.fi/protocols", {}, 2, 8000);
+      if (!resp) return null;
+      const data = await resp.json();
+      return { top_protocol: data.length > 0 ? data[0].name : null, count: data.length, source: "defillama" };
+    });
+    if (!r) r = errRes(502, "DEFI_PROTOCOLS_FAILED");
+    return r;
+  }
+
+  // ===== DeFi Stablecoin MCap =====
+  if (path === "/api/defi/stablecoins") {
+    let r = await cachedResp(request, "defi:stablecoins", 300, async () => {
+      const resp = await fetchRetry(
+        "https://stablecoins.llama.fi/stablecoins?includePrices=false",
+        {}, 2, 8000
+      );
+      if (!resp) return null;
+      const data = await resp.json();
+      let total = 0;
+      (data.peggedAssets || []).forEach(function(a) { total += (a.circulating && a.circulating.peggedUSD) || 0; });
+      return { total_mcap: total, source: "defillama" };
+    });
+    if (!r) r = errRes(502, "DEFI_STABLECOINS_FAILED");
+    return r;
+  }
+
+  // ===== Fear & Greed =====
+  if (path === "/api/fng") {
+    let r = await cachedResp(request, "fng", 3600, async () => {
+      const resp = await fetchRetry("https://api.alternative.me/fng/?limit=1", {}, 2, 5000);
+      if (!resp) return null;
+      const data = await resp.json();
+      return data.data ? data.data[0] : null;
+    });
+    if (!r) r = errRes(502, "FNG_FAILED");
+    return r;
+  }
+
+  // ===== Binance 资金费率 =====
+  if (path === "/api/funding") {
+    let r = await cachedResp(request, "funding:" + (url.searchParams.get("symbols") || "BTCUSDT,ETHUSDT"), 30, async () => {
+      const symbols = (url.searchParams.get("symbols") || "BTCUSDT,ETHUSDT").split(",").slice(0, 5);
+      const results = await Promise.all(
+        symbols.map(async function(sym) {
+          const resp = await fetchRetry(
+            `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${sym}`,
+            {}, 1, 3000
+          );
+          if (!resp) return [sym, null];
+          const data = await resp.json();
+          return [sym, {
+            symbol: data.symbol,
+            markPrice: data.markPrice,
+            lastFundingRate: data.lastFundingRate,
+            nextFundingTime: data.nextFundingTime
+          }];
+        })
+      );
+      const obj = {};
+      results.forEach(function(r) { obj[r[0]] = r[1]; });
+      return { funding: obj, source: "binance" };
+    });
+    if (!r) r = errRes(502, "FUNDING_FAILED");
+    return r;
+  }
+
+  // ===== GoPlus 安全扫描 =====
+  if (path === "/api/security") {
+    const contract = url.searchParams.get("contract") || "0xdac17f958d2ee523a2206206994597c13d831ec7";
+    const chain = url.searchParams.get("chain") || "1";
+    let r = await cachedResp(request, "security:" + chain + ":" + contract, 300, async () => {
+      const apiKey = env.GOPLUS_API_KEY || "";
+      const headers = {};
+      if (apiKey) headers["Authorization"] = apiKey;
+      const resp = await fetchRetry(
+        `https://api.gopluslabs.io/api/v1/token_security/${chain}?contract_addresses=${contract}`,
+        { headers: headers }, 1, 8000
+      );
+      if (!resp) return null;
+      return await resp.json();
+    });
+    if (!r) r = errRes(502, "SECURITY_FAILED");
     return r;
   }
 
