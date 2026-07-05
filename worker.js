@@ -402,47 +402,6 @@ var STATIC_COINS = {
   "Ethereum (ETH)": "ethereum",
   "Solana (SOL)": "solana"
 };
-
-// ==================== Etherscan 代理路由 ====================
-async function handleEtherscanProxy(request, env) {
-  const url = new URL(request.url);
-  const action = url.searchParams.get('action') || 'gasoracle';
-  const apiKey = env.ETHERSCAN_API_KEY;
-
-  if (!apiKey) {
-    log("error", "etherscan_no_api_key");
-    return errRes(500, "ETHERSCAN_NOT_CONFIGURED");
-  }
-
-  let upstreamUrl;
-  switch (action) {
-    case 'gasoracle':
-      upstreamUrl = `https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey=${apiKey}`;
-      break;
-    default:
-      return errRes(400, `UNKNOWN_ETHERSCAN_ACTION: ${action}`);
-  }
-
-  const start = Date.now();
-  const resp = await fetchRetry(upstreamUrl, {}, 2, CONFIG.TIMEOUT_DEFAULT);
-  if (!resp) {
-    log("error", "etherscan_upstream_failed", { action });
-    return errRes(502, "ETHERSCAN_UPSTREAM_FAILED");
-  }
-
-  const data = await resp.json();
-  log("info", "etherscan_proxy_success", { action, latency_ms: Date.now() - start });
-
-  return Response.json(data, {
-    headers: {
-      "Cache-Control": "public, max-age=15",
-      "CDN-Cache-Control": "public, max-age=15"
-    }
-  });
-}
-__name(handleEtherscanProxy, "handleEtherscanProxy");
-// ==================== Etherscan 代理路由结束 ====================
-
 var worker_default = {
   async fetch(request, env, ctx) {
     const startTs = Date.now();
@@ -460,7 +419,7 @@ var worker_default = {
     const headers = corsHdrs(request);
     const finalHeaders = new Headers(response.headers);
     Object.entries(headers).forEach(([k, v]) => finalHeaders.set(k, v));
-    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v6.1");
+    finalHeaders.set("X-Powered-By", "CogCloud Data Worker v6.0");
     finalHeaders.set("X-Response-Time-Ms", String(Date.now() - startTs));
     return new Response(response.body, {
       status: response.status,
@@ -476,13 +435,6 @@ async function handleRequest(request, env, ctx) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHdrs(request) });
   }
-
-  // ===== 公开路由（无需认证）=====
-  if (path === "/api/etherscan") {
-    return handleEtherscanProxy(request, env);
-  }
-  // ===== 公开路由结束 =====
-
   const authHeader = request.headers.get("Authorization")?.replace("Bearer ", "");
   if (env.AUTH_TOKEN && authHeader !== env.AUTH_TOKEN) {
     log("warn", "auth_failed", { ip, has_header: !!authHeader });
@@ -617,4 +569,4 @@ __name(handleRequest, "handleRequest");
 export {
   worker_default as default
 };
-//# sourceMappingURL=worker.js.map
+//# sourceMappingURL=worker.js.map 
