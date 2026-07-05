@@ -136,10 +136,9 @@ function errRes(code, detail) {
 }
 __name(errRes, "errRes");
 function corsHdrs(request) {
-  const origin = request.headers.get("Origin") || "";
-  const allowed = CONFIG.CORS_ORIGINS.includes(origin) ? origin : CONFIG.CORS_ORIGINS[0];
+  const origin = request.headers.get("Origin") || "*";
   return {
-    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Max-Age": "86400"
