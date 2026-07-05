@@ -3,4 +3,4 @@ main = "worker.js"
 compatibility_date = "2025-01-01"
 
 [vars]
-AUTH_TOKEN = "cogcloud-internal-2026"
+ETHERSCAN_API_KEY = "1MFDHT8D9NZCCVAY2MHNQ2HYGCBTICNBWN"
