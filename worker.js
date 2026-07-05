@@ -416,7 +416,7 @@ async function handleEtherscanProxy(request, env) {
   let upstreamUrl;
   switch (action) {
     case 'gasoracle':
-      upstreamUrl = `https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey=${apiKey}`;
+      upstreamUrl = `https://api.etherscan.io/v2/api?chainid=1&module=gastracker&action=gasoracle&apikey=${apiKey}`;
       break;
     default:
       return errRes(400, `UNKNOWN_ETHERSCAN_ACTION: ${action}`);
