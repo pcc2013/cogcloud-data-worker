@@ -4,4 +4,6 @@ compatibility_date = "2025-01-01"
 
 [vars]
 AUTH_TOKEN = "cogcloud-internal-2026"
-COGCLOUD_KV="d9d520972386457b8eb18f6472cb1efd"
+[[kv_namespaces]]
+binding = "COGCLOUD_KV"
+id = "d9d520972386457b8eb18f6472cb1efd"
