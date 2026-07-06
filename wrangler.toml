@@ -4,3 +4,4 @@ compatibility_date = "2025-01-01"
 
 [vars]
 AUTH_TOKEN = "cogcloud-internal-2026"
+COGCLOUD_KV="d9d520972386457b8eb18f6472cb1efd"
