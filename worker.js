@@ -510,7 +510,9 @@ async function handleRequest(request, env, ctx) {
   var url = new URL(request.url);
   var path = url.pathname;
   var ip = request.headers.get("CF-Connecting-IP") || "unknown";
-
+  if (path === "/_headers" || path === "/_redirects" || path === "/components/shared.js" || path.match(/\.(js|css|png|ico|svg|woff2|json|xml|txt)$/)) {
+    return fetch(request);
+  }
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHdrs(request) });
   if (!limiter.check(ip)) return errRes(429, "RATE_LIMITED");
 
