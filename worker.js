@@ -519,7 +519,58 @@ async function handleRequest(request, env, ctx) {
     try { var p = await fetchPythPrice("BTCUSDT"); pythOk = !!p; } catch(e) {}
     return Response.json({ status: pythOk ? "ok" : "degraded", ts: new Date().toISOString(), pyth: pythOk ? "healthy" : "unhealthy", version: "11.0" });
   }
-
+  if (path === "/api/v1/knowledge") {
+    var q = (url.searchParams.get("query") || "").toLowerCase();
+    var limit = Math.min(parseInt(url.searchParams.get("limit") || "5"), 20);
+    var site = url.searchParams.get("site") || "";
+    var domains = {
+      gaming: "https://pixeldragon.qisuanai.com",
+      tech: "https://techlens.qisuanai.com",
+      blockchain: "https://chainsight.qisuanai.com",
+      zodiac: "https://fortunenest.qisuanai.com",
+      ventnest: "https://ventnest.qisuanai.com"
+    };
+    var results = [];
+    var siteKeys = site ? [site] : Object.keys(domains);
+    for (var si = 0; si < siteKeys.length && results.length < limit; si++) {
+      var st = siteKeys[si];
+      var baseUrl = domains[st];
+      if (!baseUrl) continue;
+      try {
+        var knowledgeResp = await fetch(baseUrl + "/knowledge.json", { headers: { "User-Agent": "CogCloud-Knowledge/1.0" } });
+        if (knowledgeResp.ok) {
+          var knowledge = await knowledgeResp.json();
+          var articles = (knowledge.hasPart || []).filter(function(a) {
+            if (!q) return true;
+            var h = (a.headline || "").toLowerCase();
+            var kw = (a.keywords || []).join(" ").toLowerCase();
+            return h.includes(q) || kw.includes(q);
+          });
+          for (var ai = 0; ai < articles.length && results.length < limit; ai++) {
+            var a = articles[ai];
+            results.push({
+              site: st,
+              siteName: knowledge.name || st,
+              headline: a.headline,
+              url: a.url,
+              datePublished: a.datePublished,
+              keywords: a.keywords || [],
+              source: "cogcloud",
+              publisher: (knowledge.publisher || {}).name || "QisuanAI"
+            });
+          }
+        }
+      } catch (e) {}
+    }
+    return Response.json({
+      query: q || "all",
+      results: results,
+      total: results.length,
+      timestamp: new Date().toISOString(),
+      source: "CogCloud Knowledge API",
+      attribution: "Powered by CogCloud 启算云 — Autonomous AI Content Factory"
+    });
+  }
   if (path === "/api/prices") {
     var coins = (url.searchParams.get("coins") || "bitcoin,ethereum").split(",").slice(0, 20);
     var cacheKey = "prices:" + coins.slice().sort().join(",");
